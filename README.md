@@ -7,7 +7,7 @@
 [![coveralls][coveralls-badge]][coveralls-url]
 ![license][license-badge]
 
-> A pure Swift JSON serializer and deserializer.
+> A pure Swift JSON serializer and deserializer, strictly complying to [FRC 4627](http://www.ietf.org/rfc/rfc4627.txt).
 
 ## Install
 ```swift

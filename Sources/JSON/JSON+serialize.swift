@@ -5,12 +5,11 @@
 //  Copyright © 2016 Ninh. All rights reserved.
 //
 
-import Byte
-
 extension JSON {
 
-    public func serialized(pretty: Bool = false) -> Bytes? {
-        let result: Bytes?
+    // Returns stringifed JSON in UTF8 encoding.
+    public func serialized(pretty: Bool = false) -> [UInt8]? {
+        let result: [UInt8]?
         do {
             result = try JSON.serialize(self, pretty: pretty)
         } catch {
@@ -19,6 +18,7 @@ extension JSON {
         return result
     }
 
+    // Returns stringifed JSON in `String`.
     public func stringified(pretty: Bool = false) -> String? {
         let result: String?
         do {
@@ -31,18 +31,31 @@ extension JSON {
 }
 
 extension JSON {
-    public static func serialize(_ json: JSON, pretty: Bool = false) throws -> Bytes {
-        let result: Bytes
+    public struct InvalidError: Error, CustomStringConvertible, CustomDebugStringConvertible {
+        public let description = "Invalid JSON object"
+        fileprivate init() {
+        }
+        public var debugDescription: String {
+            return description
+        }
+    }
+}
+
+extension JSON {
+
+    // Returns stringifed JSON in UTF8 encoding.
+    public static func serialize(_ json: JSON, pretty: Bool = false) throws -> [UInt8] {
+        let result: [UInt8]
         let serializer = Serializer(pretty: pretty)
         if serializer.serialize(any: json.value) {
             result = serializer.buffer
-        }
-        else {
-            throw JSON.Error(description: "Invalid JSON object", code: .invalidJSON)
+        } else {
+            throw JSON.InvalidError()
         }
         return result
     }
 
+    // Returns stringifed JSON in `String`.
     public static func stringify(_ json: JSON, pretty: Bool = false) throws -> String {
         let bytes = try serialize(json, pretty: pretty)
         return bytes.makeString()
@@ -51,7 +64,7 @@ extension JSON {
 
 private class Serializer {
 
-    var buffer: Bytes = []
+    var buffer: [UInt8] = []
     var pretty: Bool
     var level: Int = 0
     var line: Int = 0
@@ -73,8 +86,7 @@ private class Serializer {
                 buffer.append(0x72)
                 buffer.append(0x75)
                 buffer.append(0x65)
-            }
-            else {
+            } else {
                 buffer.append(0x66)
                 buffer.append(0x61)
                 buffer.append(0x6C)
@@ -88,7 +100,7 @@ private class Serializer {
             return true
 
         case let double as Double:
-            buffer.append(contentsOf: String(double).makeBytes())
+            buffer.append(contentsOf: String(double).utf8)
             return true
 
         case let array as [JSON]:
@@ -99,8 +111,7 @@ private class Serializer {
                 for element in array {
                     if hasItems {
                         buffer.append(0x2C) // ,
-                    }
-                    else {
+                    } else {
                         hasItems = true
                     }
                     if pretty {
@@ -126,8 +137,7 @@ private class Serializer {
                 for key in dictionary.keys.sorted() {
                     if hasItems {
                         buffer.append(0x2C) // ,
-                    }
-                    else {
+                    } else {
                         hasItems = true
                     }
 
@@ -172,7 +182,7 @@ private class Serializer {
         }
     }
 
-    private func serialize<T>(array: [T]) -> Bool where T:Any {
+    private func serialize<T>(array: [T]) -> Bool where T: Any {
         buffer.append(0x5B) // [
         if !array.isEmpty {
             level += 1
@@ -180,8 +190,7 @@ private class Serializer {
             for element in array {
                 if hasItems {
                     buffer.append(0x2C) // ,
-                }
-                else {
+                } else {
                     hasItems = true
                 }
                 if pretty {
@@ -200,7 +209,7 @@ private class Serializer {
         return true
     }
 
-    private func serialize<T>(dictionary: [String: T]) -> Bool where T:Any {
+    private func serialize<T>(dictionary: [String: T]) -> Bool where T: Any {
         buffer.append(0x7B) // {
         if !dictionary.isEmpty {
             level += 1
@@ -208,8 +217,7 @@ private class Serializer {
             for key in dictionary.keys.sorted() {
                 if hasItems {
                     buffer.append(0x2C) // ,
-                }
-                else {
+                } else {
                     hasItems = true
                 }
 
@@ -270,25 +278,6 @@ private class Serializer {
         buffer.append(0x22) // "
         for byte in string.utf8 {
             switch byte {
-            case 0x08: // \b
-                buffer.append(0x5C)
-                buffer.append(0x62)
-            case 0x09: // \t
-                buffer.append(0x5C)
-                buffer.append(0x74)
-            case 0x0A: // \n
-                buffer.append(0x5C)
-                buffer.append(0x6E)
-                line += 1
-            case 0x0B: // \v
-                buffer.append(0x5C)
-                buffer.append(0x76)
-            case 0x0C: // \f
-                buffer.append(0x5C)
-                buffer.append(0x66)
-            case 0x0D: // \r
-                buffer.append(0x5C)
-                buffer.append(0x72)
             case 0x22: // \"
                 buffer.append(0x5C)
                 buffer.append(0x22)
@@ -298,8 +287,33 @@ private class Serializer {
             case 0x5C: // \\
                 buffer.append(0x5C)
                 buffer.append(0x5C)
+            case 0x08: // \b
+                buffer.append(0x5C)
+                buffer.append(0x62)
+            case 0x0C: // \f
+                buffer.append(0x5C)
+                buffer.append(0x66)
+            case 0x0A: // \n
+                buffer.append(0x5C)
+                buffer.append(0x6E)
+                line += 1
+            case 0x0D: // \r
+                buffer.append(0x5C)
+                buffer.append(0x72)
+            case 0x09: // \t
+                buffer.append(0x5C)
+                buffer.append(0x74)
             default:
-                buffer.append(byte)
+                if byte < 0x20 { // \u00XX
+                    buffer.append(0x5C)
+                    buffer.append(0x75)
+                    buffer.append(0x30)
+                    buffer.append(0x30)
+                    buffer.append(byte.hexEncoded(of: .high))
+                    buffer.append(byte.hexEncoded(of: .low))
+                } else {
+                    buffer.append(byte)
+                }
             }
         }
         buffer.append(0x22) // "

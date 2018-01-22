@@ -11,14 +11,14 @@ import XCTest
 class JSONSerializeTests: XCTestCase {
 
     static var allTests = [
-        ("null", testNull),
-        ("bool", testBool),
-        ("int", testInt),
-        ("double", testDouble),
-        ("string", testString),
-        ("array", testArray),
-        ("dictionary", testDictionary),
-        ("invalidJSON", testInvalidJSON)
+        ("testNull", testNull),
+        ("testBool", testBool),
+        ("testInt", testInt),
+        ("testDouble", testDouble),
+        ("testString", testString),
+        ("testArray", testArray),
+        ("testDictionary", testDictionary),
+        ("testInvalidJSON", testInvalidJSON)
     ]
 
     func testNull() {
@@ -46,8 +46,8 @@ class JSONSerializeTests: XCTestCase {
     }
 
     func testString() {
-        let string1 = "test\"\\?/\u{08}\u{0b}\u{0c}\n\r\t"
-        let string2 = "\"test\\\"\\\\?\\/\\b\\v\\f\\n\\r\\t\""
+        let string1 = "test\"\\ / \u{08} \u{0} \u{0b} \u{0c} \n \r \t"
+        let string2 = "\"test\\\"\\\\ \\/ \\b \\u0000 \\u000B \\f \\n \\r \\t\""
         XCTAssertEqual(JSON(string1).stringified(), string2)
         XCTAssertEqual(JSON(string1).stringified(pretty: true), string2)
     }

@@ -5,90 +5,110 @@
 //  Copyright © 2016 Ninh. All rights reserved.
 //
 
-// MARK: - init
 public struct JSON {
 
     internal struct Null { }
 
     public static let null: Any = Null()
 
-    internal struct Undefined { }
-
-    public static let undefined: Any = Undefined()
-
     public var value: Any
 
-    public init() {
-        self.value = JSON.null
+    fileprivate init(value: Any) {
+        self.value = value
     }
 
-    public init(_ any: Any) {
-        self.value = any
+    public init() {
+        self = jsonOfNull
+    }
+
+    public init(_ value: Any?) {
+        if let value = value {
+            if (value as? Null) != nil {
+                self = jsonOfNull
+            } else {
+                self.value = value
+            }
+        } else {
+            self = jsonOfNull
+        }
     }
 }
 
-// MARK: - value
+let jsonOfNull = JSON(value: JSON.null)
+
 extension JSON {
 
-    public var null: Bool {
-        if self.value as? Null != nil {
-            return true
-        }
-        return false
+    /// List of data type available in JSON.
+    public enum ValueType {
+        /// array
+        case array
+
+        /// false or true
+        case bool
+
+        /// object
+        case dictionary
+
+        /// number
+        case number
+
+        /// null
+        case null
+
+        /// string
+        case string
+
+        /// not supported in JSON spec.
+        case unknown
     }
 
-    public var bool: Bool? {
-        if let value = self.value as? Bool {
-            return value
+    /// Returns the data type of value in JSON.
+    public var type: ValueType {
+        switch self.value {
+        case _ as [JSON]:
+            return .array
+        case _ as [Any]:
+            return .array
+        case _ as Bool:
+            return .bool
+        case _ as [String: JSON]:
+            return .dictionary
+        case _ as [String: Any]:
+            return .dictionary
+        case _ as Int:
+            return .number
+        case _ as Double:
+            return .number
+        case _ as Null:
+            return .null
+        case _ as String:
+            return .string
+        default:
+            return .unknown
         }
-        return nil
     }
+}
 
-    public var int: Int? {
-        if let value = self.value as? Int {
-            return value
-        }
-        else if let value = self.value as? Double {
-            let valueInt = Int(value)
-            if Double(valueInt) == value {
-                return valueInt
-            }
-        }
-        return nil
-    }
+extension JSON {
 
-    public var double: Double? {
-        if let value = self.value as? Int {
-            return Double(value)
-        }
-        else if let value = self.value as? Double {
-            return value
-        }
-        return nil
-    }
-
-    public var string: String? {
-        if let value = self.value as? String {
-            return value
-        }
-        return nil
-    }
-
-    public var array: [JSON]?  {
+    /// Returns an `Array` if the data type is array, otherwise `nil`.
+    public var array: [JSON]? {
         switch self.value {
         case let array as [JSON]:
             return array
-        case let values as [Any]:
-            var array = Array<JSON>(repeating: JSON(), count: values.count)
-            for (index, value) in values.enumerated() {
-                array[index].value = value
-            }
-            return array
+        case let array as [Any]:
+            return array.map { JSON($0) }
         default:
             return nil
         }
     }
 
+    /// Returns a `Bool` value if the data type is boolean, otherwise `nil`.
+    public var bool: Bool? {
+        return self.value(of: Bool.self)
+    }
+
+    /// Returns an `Dictionary` if the data type is dictionary, otherwise `nil`.
     public var dictionary: [String: JSON]? {
         switch self.value {
         case let dict as [String: JSON]:
@@ -103,280 +123,135 @@ extension JSON {
             return nil
         }
     }
+
+    /// Returns a `Double` value if the data type is number, otherwise `nil`.
+    public var double: Double? {
+        return self.value(of: Double.self)
+    }
+
+    /// Returns a `Int` value if the data type is number and
+    /// convertable to integer without losing precision, otherwise `nil`.
+    public var int: Int? {
+        return self.value(of: Int.self)
+    }
+
+    /// Returns `true` if the value is null, otherwise `false`.
+    public var null: Bool {
+        if self.value as? Null != nil {
+            return true
+        }
+        return false
+    }
+
+    /// Returns a `String` if the data type is string, otherwise `nil`.
+    public var string: String? {
+        return self.value(of: String.self)
+    }
+
+    /// Returns the value if the data type is correct, otherwise `nil`.
+    fileprivate func value<T>(of type: T.Type) -> T? {
+        if let value = self.value as? T {
+            return value
+        }
+        return nil
+    }
+
+    /// Returns the value if the data type is correct, otherwise `nil`.
+    fileprivate func value(of type: Double.Type) -> Double? {
+        if let value = self.value as? Int {
+            return Double(value)
+        } else if let value = self.value as? Double {
+            return value
+        }
+        return nil
+    }
+
+    /// Returns the value if the data type is correct, otherwise `nil`.
+    fileprivate func value(of type: Int.Type) -> Int? {
+        if let value = self.value as? Int {
+            return value
+        } else if let value = self.value as? Double, value == value.rounded(.towardZero) {
+            return Int(value)
+        }
+        return nil
+    }
 }
 
-// MARK: - arrayOf
-extension JSON {
-    public var arrayOfBool: [Bool]? {
-        switch self.value {
-        case let array as [Bool]:
-            return array
-        case let array as [JSON]:
-            return arrayOfType(array, defaultValue: false)
-        case let array as [Any]:
-            return arrayOfType(array, defaultValue: false)
-        default:
-            return nil
-        }
-    }
-
-    public var arrayOfInt: [Int]? {
-        switch self.value {
-        case let array as [Int]:
-            return array
-        case let values as [Double]:
-            var array = Array<Int>(repeating: 0, count: values.count)
-            for (index, value) in values.enumerated() {
-                let valueInt = Int(value)
-                if value == Double(valueInt) {
-                    array[index] = valueInt
-                }
-                else {
-                    return nil
-                }
-            }
-            return array
-        case let jsons as [JSON]:
-            var array = Array<Int>(repeating: 0, count: jsons.count)
-            for (index, json) in jsons.enumerated() {
-                if let value = json.int {
-                    array[index] = value
-                }
-                else {
-                    return nil
-                }
-            }
-            return array
-        case let values as [Any]:
-            var array = Array<Int>(repeating: 0, count: values.count)
-            for (index, value) in values.enumerated() {
-                if let value = JSON(value).int {
-                    array[index] = value
-                }
-                else {
-                    return nil
-                }
-            }
-            return array
-        default:
-            return nil
-        }
-    }
-
-    public var arrayOfDouble: [Double]? {
-        switch self.value {
-        case let values as [Int]:
-            var array = Array<Double>(repeating: 0, count: values.count)
-            for (index, value) in values.enumerated() {
-                array[index] = Double(value)
-            }
-            return array
-        case let array as [Double]:
-            return array
-        case let jsons as [JSON]:
-            var array = Array<Double>(repeating: 0, count: jsons.count)
-            for (index, json) in jsons.enumerated() {
-                if let value = json.double {
-                    array[index] = value
-                }
-                else {
-                    return nil
-                }
-            }
-            return array
-        case let values as [Any]:
-            var array = Array<Double>(repeating: 0, count: values.count)
-            for (index, value) in values.enumerated() {
-                if let value = JSON(value).double {
-                    array[index] = value
-                }
-                else {
-                    return nil
-                }
-            }
-            return array
-        default:
-            return nil
-        }
-    }
-
-    public var arrayOfString: [String]? {
-        switch self.value {
-        case let array as [String]:
-            return array
-        case let array as [JSON]:
-            return arrayOfType(array, defaultValue: "")
-        case let array as [Any]:
-            return arrayOfType(array, defaultValue: "")
-        default:
-            return nil
-        }
-    }
-
-    private func arrayOfType<T>(_ elements: [JSON], defaultValue: T) -> [T]? {
-        var array = Array<T>(repeating: defaultValue, count: elements.count)
-        for (index, json) in elements.enumerated() {
-            if let value = json.value as? T {
-                array[index] = value
-            }
-            else {
+extension RandomAccessCollection where Element == JSON, IndexDistance == Int {
+    public func map<T>(to type: T.Type) -> [T]? {
+        var array = [T]()
+        array.reserveCapacity(self.count)
+        for json in self {
+            guard let value = json.value(of: type) else {
                 return nil
             }
+            array.append(value)
         }
         return array
     }
 
-    private func arrayOfType<T>(_ elements: [Any], defaultValue: T) -> [T]? {
-        var array = Array<T>(repeating: defaultValue, count: elements.count)
-        for (index, element) in elements.enumerated() {
-            if let value = element as? T {
-                array[index] = value
-            }
-            else {
+    public func map(to type: Double.Type) -> [Double]? {
+        var array = [Double]()
+        array.reserveCapacity(self.count)
+        for json in self {
+            guard let value = json.value(of: type) else {
                 return nil
             }
+            array.append(value)
+        }
+        return array
+    }
+
+    public func map(to type: Int.Type) -> [Int]? {
+        var array = [Int]()
+        array.reserveCapacity(self.count)
+        for json in self {
+            guard let value = json.value(of: type) else {
+                return nil
+            }
+            array.append(value)
         }
         return array
     }
 }
 
-// MARK: - dictionaryOf
-extension JSON {
-    public var dictionaryOfBool: [String: Bool]? {
-        switch self.value {
-        case let dictionary as [String: Bool]:
-            return dictionary
-        case let dictionary as [String: JSON]:
-            return dictionaryOfType(dictionary)
-        case let dictionary as [String: Any]:
-            return dictionaryOfType(dictionary)
-        default:
-            return nil
-        }
-    }
-
-    public var dictionaryOfInt: [String: Int]? {
-        switch self.value {
-        case let dictionary as [String: Int]:
-            return dictionary
-        case let dict as [String: Double]:
-            var dictionary = Dictionary<String, Int>(minimumCapacity: dict.count)
-            for (key, value) in dict {
-                let valueInt = Int(value)
-                if value == Double(valueInt) {
-                    dictionary[key] = valueInt
-                }
-                else {
-                    return nil
-                }
-            }
-            return dictionary
-        case let jsons as [String: JSON]:
-            var dictionary = Dictionary<String, Int>(minimumCapacity: jsons.count)
-            for (key, json) in jsons {
-                if let value = json.int {
-                    dictionary[key] = value
-                }
-                else {
-                    return nil
-                }
-            }
-            return dictionary
-        case let dict as [String: Any]:
-            var dictionary = Dictionary<String, Int>(minimumCapacity: dict.count)
-            for (key, value) in dict {
-                if let value = JSON(value).int {
-                    dictionary[key] = value
-                }
-                else {
-                    return nil
-                }
-            }
-            return dictionary
-        default:
-            return nil
-        }
-    }
-
-    public var dictionaryOfDouble: [String: Double]? {
-        switch self.value {
-        case let dict as [String: Int]:
-            var dictionary = Dictionary<String, Double>(minimumCapacity: dict.count)
-            for (key, value) in dict {
-                dictionary[key] = Double(value)
-            }
-            return dictionary
-        case let dictionary as [String: Double]:
-            return dictionaryOfType(dictionary)
-        case let jsons as [String: JSON]:
-            var dictionary = Dictionary<String, Double>(minimumCapacity: jsons.count)
-            for (key, json) in jsons {
-                if let value = json.double {
-                    dictionary[key] = value
-                }
-                else {
-                    return nil
-                }
-            }
-            return dictionary
-        case let dict as [String: Any]:
-            var dictionary = Dictionary<String, Double>(minimumCapacity: dict.count)
-            for (key, value) in dict {
-                if let value = JSON(value).double {
-                    dictionary[key] = value
-                }
-                else {
-                    return nil
-                }
-            }
-            return dictionary
-        default:
-            return nil
-        }
-    }
-
-    public var dictionaryOfString: [String: String]? {
-        switch self.value {
-        case let dictionary as [String: String]:
-            return dictionary
-        case let dictionary as [String: JSON]:
-            return dictionaryOfType(dictionary)
-        case let dictionary as [String: Any]:
-            return dictionaryOfType(dictionary)
-        default:
-            return nil
-        }
-    }
-
-    private func dictionaryOfType<T>(_ dict: [String: JSON]) -> [String: T]? {
-        var dictionary = Dictionary<String, T>(minimumCapacity: dict.count)
-        for (index, json) in dict {
-            if let value = json.value as? T {
-                dictionary[index] = value
-            }
-            else {
+extension Dictionary where Key == String, Value == JSON {
+    public func map<T>(to type: T.Type) -> [String: T]? {
+        var dictionary = [String: T]()
+        dictionary.reserveCapacity(self.count)
+        for (key, json) in self {
+            guard let value = json.value(of: type) else {
                 return nil
             }
+            dictionary[key] = value
         }
         return dictionary
     }
 
-    private func dictionaryOfType<T>(_ dict: [String: Any]) -> [String: T]? {
-        var dictionary = Dictionary<String, T>(minimumCapacity: dict.count)
-        for (key, value) in dict {
-            if let value = value as? T {
-                dictionary[key] = value
-            }
-            else {
+    public func map(to type: Double.Type) -> [String: Double]? {
+        var dictionary = [String: Double]()
+        dictionary.reserveCapacity(self.count)
+        for (key, json) in self {
+            guard let value = json.value(of: type) else {
                 return nil
             }
+            dictionary[key] = value
+        }
+        return dictionary
+    }
+
+    public func map(to type: Int.Type) -> [String: Int]? {
+        var dictionary = [String: Int]()
+        dictionary.reserveCapacity(self.count)
+        for (key, json) in self {
+            guard let value = json.value(of: type) else {
+                return nil
+            }
+            dictionary[key] = value
         }
         return dictionary
     }
 }
-
-// MARK: - subscript
-let jsonOfNull = JSON(JSON.Null())
 
 extension JSON {
 
@@ -408,8 +283,6 @@ extension JSON {
 
 }
 
-// MARK: - Convertable
-
 extension JSON: CustomStringConvertible {
     public var description: String {
         return stringified() ?? "error: Invalid JSON object"
@@ -421,8 +294,6 @@ extension JSON: CustomDebugStringConvertible {
         return stringified(pretty: true) ?? "error: Invalid JSON object"
     }
 }
-
-// MARK: - Expressible
 
 extension JSON: ExpressibleByNilLiteral {
     public init(nilLiteral value: Void) {

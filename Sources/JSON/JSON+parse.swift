@@ -5,8 +5,6 @@
 //  Copyright © 2016 Ninh. All rights reserved.
 //
 
-import Byte
-
 extension JSON {
     public static func parse(bytes: UnsafePointer<UInt8>, count: Int) throws -> JSON {
         let parser = Parser(bytes: bytes, count: count)
@@ -16,9 +14,9 @@ extension JSON {
         throw parser.error!
     }
 
-    public static func parse(bytes: Bytes) throws -> JSON {
-        return try bytes.withUnsafeBytes { bp in
-            return try JSON.parse(bytes: bp.baseAddress!.assumingMemoryBound(to: UInt8.self), count: bp.count)
+    public static func parse(bytes: [UInt8]) throws -> JSON {
+        return try bytes.withUnsafeBufferPointer { bp in
+            return try JSON.parse(bytes: bp.baseAddress!, count: bp.count)
         }
     }
 
@@ -30,24 +28,27 @@ extension JSON {
 }
 
 extension JSON {
-
-    public struct Error: Swift.Error, CustomStringConvertible {
+    public struct ParsingError: Error, CustomStringConvertible, CustomDebugStringConvertible {
         public let description: String
-        public let code: Code
+        fileprivate init(description: String) {
+            self.description = description
+        }
+        public var debugDescription: String {
+            return description
+        }
     }
 }
 
-extension JSON.Error {
-    public enum Code {
-        case emptyDocument
-        case unexpectedToken
-        case unclosedArray
-        case unclosedDictionary
-        case unclosedString
-        case numberSyntax
-        case escapeSyntax
-        case invalidJSON
-    }
+private enum ParsingErrorType {
+    case emptyDocument
+    case unexpectedToken
+    case unclosedArray
+    case unclosedDictionary
+    case unclosedString
+    case invalidCharacter
+    case unpairedSurrogate
+    case numberSyntax
+    case escapeSyntax
 }
 
 private class Parser {
@@ -55,9 +56,19 @@ private class Parser {
     let count: Int
     var index: Int = 0
 
-    var buffer: Bytes = []
+    var buffer: [UInt8] = []
 
-    var error: JSON.Error?
+    // From RFC 4627, 2.5. Strings:
+    //
+    // To escape an extended character that is not in the Basic Multilingual
+    // Plane, the character is represented as a twelve-character sequence,
+    // encoding the UTF-16 surrogate pair.  So, for example, a string
+    // containing only the G clef character (U+1D11E) may be represented as
+    // "\uD834\uDD1E".
+    var highSurrogate: UInt? // UTF16 high surrogate
+    var highSurrogateIndex = 0
+
+    var error: JSON.ParsingError?
     var line = 0
     var lineStartOffset = 0
 
@@ -71,14 +82,13 @@ private class Parser {
             makeError(.emptyDocument)
             return nil
         }
-        let any = parseAny()
+        let any = parseValue()
         if any == nil {
             if error == nil {
                 makeError(.emptyDocument)
                 return nil
             }
-        }
-        else if index < count {
+        } else if index < count {
             skipWhitespaces()
             if index < count {
                 makeError(.unexpectedToken)
@@ -88,12 +98,12 @@ private class Parser {
         return any
     }
 
-    private func parseAny() -> Any? {
+    // value = false / null / true / object / array / number / string
+    private func parseValue() -> Any? {
         let byte = bytes[index]
         if byte == 0x2D || (byte >= 0x30 && byte <= 0x39) { // -, 0..9
             return parseNumber()
-        }
-        else {
+        } else {
             switch byte {
             case 0x22: // \"
                 return parseString()
@@ -101,28 +111,30 @@ private class Parser {
                 return parseArray()
             case 0x7B: // {
                 return parseDictionary()
-            case 0x08, 0x09, 0x0A, 0x00B, 0x0C, 0x0D, 0x20: // \t \n \f \r space
+            case 0x20, 0x09, 0x0A, 0x0D: // space \t \n \r
                 skipWhitespaces()
                 if index < count {
-                    return parseAny()
-                }
-                else {
+                    return parseValue()
+                } else {
                     return nil
                 }
             default:
-                return parseIdent()
+                return parseName()
             }
         }
     }
 
+    // array           = begin-array [ value *( value-separator value ) ] end-array
+    // begin-array     = ws %x5B ws  ; [ left square bracket
+    // end-array       = ws %x5D ws  ; ] right square bracket
+    // value-separator = ws %x2C ws  ; , comma
     private func parseArray() -> Any? {
-
-        index += 1 // [
         var array = [JSON]()
 
+        index += 1 // [
         while index < count {
 
-            // skip whitespace if any
+            // ws
             skipWhitespaces()
             if index >= count { // unclosed ]
                 makeError(.unclosedArray)
@@ -135,35 +147,26 @@ private class Parser {
                 return array
             }
 
-            // element
-            guard let element = parseAny() else {
+            // value
+            guard let value = parseValue() else {
                 makeError(.unclosedArray)
                 return nil
             }
-            if index >= count { // unclosed ]
-                makeError(.unclosedArray)
-                return nil
-            }
+            array.append(JSON(value))
 
-            // add to array
-            array.append(JSON(element))
-
-            // skip whitespace if any
+            // ws
             skipWhitespaces()
             if index >= count { // unclosed ]
                 makeError(.unclosedArray)
                 return nil
             }
 
-            // ,
+            // , or ]
             let byte = bytes[index]
             if byte == 0x2C {
                 index += 1
                 continue
-            }
-
-            // ]
-            else if byte == 0x5D {
+            } else if byte == 0x5D {
                 continue
             }
 
@@ -176,14 +179,19 @@ private class Parser {
         return nil // unclosed ]
     }
 
+    // object          = begin-object [ member *( value-separator member ) ] end-object
+    // begin-array     = ws %x5B ws  ; [ left square bracket
+    // end-object      = ws %x7D ws  ; } right curly bracket
+    // member          = string name-separator value
+    // name-separator  = ws %x3A ws  ; : colon
+    // value-separator = ws %x2C ws  ; , comma
     private func parseDictionary() -> Any? {
-
-        index += 1 // {
         var dictionary = [String: JSON]()
 
+        index += 1 // {
         while index < count {
 
-            // skip whitespace if any
+            // ws
             skipWhitespaces()
             if index >= count { // unclosed }
                 makeError(.unclosedDictionary)
@@ -196,8 +204,8 @@ private class Parser {
                 return dictionary
             }
 
-            // "key"
-            if bytes[index] != 0x22 {
+            // " is expected - "key"
+            guard bytes[index] == 0x22 else {
                 makeError(.unexpectedToken)
                 return nil
             }
@@ -205,7 +213,7 @@ private class Parser {
                 return nil
             }
 
-            // skip whitespace if any
+            // ws
             skipWhitespaces()
             if index >= count { // unclosed }
                 makeError(.unclosedDictionary)
@@ -213,13 +221,13 @@ private class Parser {
             }
 
             // : is expected
-            if bytes[index] != 0x3A {
+            guard bytes[index] == 0x3A else {
                 makeError(.unexpectedToken)
                 return nil
             }
             index += 1
 
-            // skip whitespace if any
+            // ws
             skipWhitespaces()
             if index >= count { // unclosed }
                 makeError(.unclosedDictionary)
@@ -227,7 +235,7 @@ private class Parser {
             }
 
             // value
-            guard let value = parseAny() else {
+            guard let value = parseValue() else {
                 makeError(.unclosedDictionary)
                 return nil
             }
@@ -235,26 +243,23 @@ private class Parser {
             // add to dictionary
             dictionary[key] = JSON(value)
 
-            // skip whitespace if any
+            // ws
             skipWhitespaces()
             if index >= count { // unclosed }
                 makeError(.unclosedDictionary)
                 return nil
             }
 
-            // ,
+            // , or }
             let byte = bytes[index]
             if byte == 0x2C {
                 index += 1
                 continue
-            }
-
-            // }
-            if byte == 0x7D {
+            } else if byte == 0x7D {
                 continue
             }
 
-            // invalid
+            // unexpected token
             makeError(.unexpectedToken)
             return nil
         }
@@ -263,108 +268,234 @@ private class Parser {
         return nil // unclosed }
     }
 
+    // number        = [ minus ] int [ frac ] [ exp ]
+    // decimal-point = %x2E       ; .
+    // digit1-9      = %x31-39         ; 1-9
+    // e             = %x65 / %x45            ; e E
+    // exp           = e [ minus / plus ] 1*DIGIT
+    // frac          = decimal-point 1*DIGIT
+    // int           = zero / ( digit1-9 *DIGIT )
+    // minus         = %x2D               ; -
+    // plus          = %x2B                ; +
+    // zero          = %x30                ; 0
     private func parseNumber() -> Any? {
+        enum State {
+            case minusOrInt
+            case zero
+            case int
+            case intDigits
+            case frac
+            case fracDigits
+            case expSign
+            case exp
+            case expDigits
+        }
+        var state = State.minusOrInt
+        var string = ""
+        let firstIndex = index
 
-        var acceptsDash = true
-        var acceptsDot = true
-        var hasDot = false
-        var hasDigits = false
-        var negative = false
-
-        var integer = 0
-        var fraction: Double = 0
-        var fractionDigits: Double = 1
-
-        while index < count {
+        read: while index < count {
             let byte = bytes[index]
+            switch byte {
+            case 0x2D: // -
+                switch state {
+                case .minusOrInt:
+                    state = .int
+                case .expSign:
+                    state = .exp
+                default:
+                    makeError(.numberSyntax)
+                    return nil
+                }
+                string.append("-")
 
-            if byte == 0x2D { // -
-                guard acceptsDash else {
+            case 0x30 ... 0x39: // 0..9
+                switch state {
+                case .minusOrInt:
+                    if byte == 0x30 { // 0
+                        state = .zero
+                    } else {
+                        state = .intDigits
+                    }
+                case .int:
+                    guard byte != 0x30 else { // must not be 0
+                        makeError(.numberSyntax)
+                        return nil
+                    }
+                    state = .intDigits
+                case .intDigits:
+                    break
+                case .frac:
+                    state = .fracDigits
+                case .fracDigits:
+                    break
+                case .exp:
+                    state = .expDigits
+                case .expDigits:
+                    break
+                default:
                     makeError(.numberSyntax)
                     return nil
                 }
-                negative = true
-                acceptsDash = false
-                index += 1
-            }
-            else if byte == 0x2E { // .
-                guard acceptsDot else {
+                string.append(String(byte - 0x30, radix: 10))
+
+            case 0x2E: // .
+                switch state {
+                case .zero, .intDigits:
+                    state = .frac
+                default:
                     makeError(.numberSyntax)
                     return nil
                 }
-                hasDot = true
-                acceptsDot = false
-                index += 1
-            }
-            else if byte >= 0x30 && byte <= 0x39 { // 0..9
-                hasDigits = true
-                acceptsDash = false
-                if hasDot {
-                    fractionDigits *= 10
-                    fraction += Double(byte - 0x30) / fractionDigits
+                string.append(".")
+
+            case 0x65, 0x45: // e E
+                switch state {
+                case .zero, .intDigits, .fracDigits:
+                    state = .expSign
+                default:
+                    makeError(.numberSyntax)
+                    return nil
                 }
-                else {
-                    integer = integer * 10 + Int(byte - 0x30)
+                string.append(byte == 0x65 ? "e" : "E")
+
+            case 0x2B: // +
+                switch state {
+                case .expSign:
+                    state = .exp
+                default:
+                    makeError(.numberSyntax)
+                    return nil
                 }
-                index += 1
-            }
-            else if byte == 0x2C    // ,
-            || byte == 0x5D         // ]
-            || byte == 0x7D         // }
-            || byte == 0x20         // ws
-            || (0x08 <= byte && byte <= 0x0D) {
-                break
-            }
-            else {
+                string.append("+")
+
+            case 0x2C, 0x5D, 0x7D, 0x20, 0x09, 0x0A, 0x0D:  // , ] } space \t \n \r
+                break read
+
+            default:
                 makeError(.numberSyntax)
                 return nil
             }
+
+            index += 1
         }
 
-        if !hasDigits { // only happend with dash (-) not followed by digits
+        // number must be terminated at state of only Zero, or
+        // reading remainding digits (from the 2nd on) of int, frac or exp
+        switch state {
+        case .zero:
+            return Int(0)
+        case .intDigits:
+            guard let int = Int(string, radix: 10) else {
+                index = firstIndex
+                makeError(.numberSyntax)
+                return nil
+            }
+            return int
+        case .fracDigits, .expDigits:
+            guard let double = Double(string) else {
+                index = firstIndex
+                makeError(.numberSyntax)
+                return nil
+            }
+            return double
+        default:
             makeError(.numberSyntax)
             return nil
         }
-
-        if fractionDigits > 1 {
-            let double = Double(integer) + fraction
-            return negative ? -double : double
-        }
-        else if hasDot {
-            makeError(.numberSyntax)
-            return nil
-        }
-
-        return negative ? -integer : integer
     }
 
+    // string         = quotation-mark *char quotation-mark
+    // char           = unescaped / escaped
+    // quotation-mark = %x22      ; "
+    // unescaped      = %x20-21 / %x23-5B / %x5D-10FFFF
     private func parseString() -> String? {
-
         buffer.removeAll(keepingCapacity: true)
 
         // skip "
         index += 1
-
         while index < count {
             let byte = bytes[index]
-            if byte == 0x22 { // "
-                index += 1
-                return buffer.makeString()
-            }
-            else if byte == 0x5C { // \
-                if !parseEscape() {
+            if byte == 0x5C { // \
+                guard parseEscaped() else {
                     return nil
                 }
-            }
-            else if byte == 0x0A {
-                buffer.append(byte)
-                index += 1
-                line += 1
-                lineStartOffset = index
-            }
-            else {
-                buffer.append(byte)
-                index += 1
+            } else {
+                if hasSurrogateError() {
+                    return nil
+                }
+                if byte == 0x22 { // "
+                    index += 1
+                    return buffer.makeString()
+                } else if byte >= 0x20 { // valid unit, check code
+                    if byte & 0x80 == 0 { // 1 bytes
+                        buffer.append(byte)
+                        index += 1
+                    } else if byte & 0xE0 == 0xC0 { // 2 bytes
+                        guard index + 1 < count else {
+                            index += 1
+                            makeError(.unclosedString)
+                            return nil
+                        }
+                        let byte1 = bytes[index + 1]
+
+                        let code = (UInt(byte & 0x1F) << 6) | UInt(byte1 & 0x3F)
+                        guard code >= 0x80 else {
+                            makeError(.invalidCharacter)
+                            return nil
+                        }
+
+                        buffer.append(byte)
+                        buffer.append(byte1)
+                        index += 2
+                    } else if byte & 0xF0 == 0xE0 { // 3 bytes
+                        guard index + 2 < count else {
+                            index += 1
+                            makeError(.unclosedString)
+                            return nil
+                        }
+                        let byte1 = bytes[index + 1]
+                        let byte2 = bytes[index + 2]
+
+                        let code = (UInt(byte & 0x0F) << 12) | (UInt(byte1 & 0x3F) << 6) | UInt(byte2 & 0x3F)
+                        guard (0x800 <= code && code < 0xD800) || (0xDFFF < code && code <= 0xFFFF) else {
+                            makeError(.invalidCharacter)
+                            return nil
+                        }
+
+                        buffer.append(byte)
+                        buffer.append(byte1)
+                        buffer.append(byte2)
+                        index += 3
+                    } else if byte & 0xF8 == 0xF0 { // 4 bytes
+                        guard index + 3 < count else {
+                            index += 1
+                            makeError(.unclosedString)
+                            return nil
+                        }
+                        let byte1 = bytes[index + 1]
+                        let byte2 = bytes[index + 2]
+                        let byte3 = bytes[index + 3]
+
+                        let code = (UInt(byte & 0x07) << 18) | (UInt(byte1 & 0x3F) << 12) | (UInt(byte2 & 0x3F) << 6) | UInt(byte3)
+                        guard 0x10000 <= code && code < 0x10FFFF else {
+                            makeError(.invalidCharacter)
+                            return nil
+                        }
+
+                        buffer.append(byte)
+                        buffer.append(byte1)
+                        buffer.append(byte2)
+                        buffer.append(byte3)
+                        index += 4
+                    } else {
+                        makeError(.invalidCharacter)
+                        return nil
+                    }
+                } else {
+                    makeError(.invalidCharacter)
+                    return nil
+                }
             }
         }
 
@@ -372,114 +503,96 @@ private class Parser {
         return nil // unclosed "
     }
 
-    private func parseEscape() -> Bool {
+    // escaped =  escape (
+    //            %x22 /          ; "    quotation mark  U+0022
+    //            %x5C /          ; \    reverse solidus U+005C
+    //            %x2F /          ; /    solidus         U+002F
+    //            %x62 /          ; b    backspace       U+0008
+    //            %x66 /          ; f    form feed       U+000C
+    //            %x6E /          ; n    line feed       U+000A
+    //            %x72 /          ; r    carriage return U+000D
+    //            %x74 /          ; t    tab             U+0009
+    //            %x75 4HEXDIG )  ; uXXXX                U+XXXX
+    // escape = %x5C              ; \
+    private func parseEscaped() -> Bool {
         index += 1 // \
         if index >= count {
-            buffer.append(.backSlash)
-            return true
-        }
-        switch bytes[index] {
-        case 0x62: // \b
-            index += 1
-            buffer.append(0x08)
-            return true
-        case 0x74: // \t
-            index += 1
-            buffer.append(0x09)
-            return true
-        case 0x6E: // \n
-            index += 1
-            buffer.append(0x0A)
-            return true
-        case 0x76: // \v
-            index += 1
-            buffer.append(0x0B)
-            return true
-        case 0x66: // \f
-            index += 1
-            buffer.append(0x0C)
-            return true
-        case 0x72: // \r
-            index += 1
-            buffer.append(0x0D)
-            return true
-        case 0x22: // \"
-            index += 1
-            buffer.append(0x22)
-            return true
-        case 0x2F: // \/
-            index += 1
-            buffer.append(0x2F)
-            return true
-        case 0x5C: // \\
-            index += 1
             buffer.append(0x5C)
-            return true
-        case 0x30 ... 0x39: // \(0-255) -> octal escape sequences
-            var number = Int(bytes[index]) - 0x30
-            index += 1
-            if index < count && bytes[index].isDigit {
-                number = number * 10 + (Int(bytes[index]) - 0x30)
-                index += 1
-            }
-            if index < count && bytes[index].isDigit {
-                number = number * 10 + (Int(bytes[index]) - 0x30)
-                index += 1
-            }
-            let scalar = Unicode.Scalar(number)!
-            buffer.append(contentsOf: String(Character(scalar)).makeBytes())
-            return true
-
-        case 0x78: // \xXX -> hexadecimal escape sequences
-            index += 1
-            guard index + 2 <= count &&
-                bytes[index].isHexDigit &&
-                bytes[index + 1].isHexDigit
-            else {
-                makeError(.escapeSyntax)
-                return false
-            }
-            let number = Int([bytes[index], bytes[index + 1]], radix: 16)!
-            let scalar = Unicode.Scalar(number)!
-            buffer.append(contentsOf: String(Character(scalar)).makeBytes())
-            index += 2
-            return true
-        case 0x75: // \uXXXX -> Unicode escape sequences
-            index += 1
-            guard index + 4 <= count &&
-                bytes[index].isHexDigit &&
-                bytes[index + 1].isHexDigit &&
-                bytes[index + 2].isHexDigit &&
-                bytes[index + 3].isHexDigit
-            else {
-                makeError(.escapeSyntax)
-                return false
-            }
-            guard let number = Int(
-                    [
-                        bytes[index],
-                        bytes[index + 1],
-                        bytes[index + 2],
-                        bytes[index + 3]
-                    ],
-                    radix: 16
-                ),
-                let scalar = Unicode.Scalar(number)
-            else {
-                makeError(.escapeSyntax)
-                return false
-            }
-            buffer.append(contentsOf: String(Character(scalar)).makeBytes())
-            index += 4
-            return true
-        default:
-            buffer.append(bytes[index])
-            index += 1
-            return true
+            return true // end of data, return true so it will raise unclosedString error
         }
+        let byte = bytes[index]
+
+        // \uXXXX -> Unicode escape sequences
+        if byte == 0x75 {
+            index += 1
+            guard index + 4 <= count,
+            let u0 = bytes[index].hexDecoded(),
+            let u1 = bytes[index + 1].hexDecoded(),
+            let u2 = bytes[index + 2].hexDecoded(),
+            let u3 = bytes[index + 3].hexDecoded() else {
+                makeError(.escapeSyntax)
+                return false
+            }
+            let code = (UInt(u0) << 12) + (UInt(u1) << 8) + (UInt(u2) << 4) + UInt(u3)
+
+            if 0xD800 <= code && code <= 0xDBFF { // UTF16 high surrogate
+                if hasSurrogateError() {
+                    return false
+                }
+                self.highSurrogate = code
+                self.highSurrogateIndex = index
+            } else if 0xDC00 <= code && code <= 0xDFFF { // UTF16 low surrogate
+                guard let surrogate = self.highSurrogate else {
+                    makeError(.unpairedSurrogate)
+                    return false
+                }
+                self.highSurrogate = nil
+                buffer.append(unicode: 0x10000 + ((surrogate & 0x03FF) << 10) + (code & 0x03FF))
+            } else {
+                if hasSurrogateError() {
+                    return false
+                }
+                buffer.append(unicode: code)
+            }
+            index += 4
+        } else {
+            if hasSurrogateError() {
+                return false
+            }
+            switch byte {
+            case 0x22, 0x5C, 0x2F: // \", \\, \/
+                buffer.append(byte)
+            case 0x62: // \b
+                buffer.append(0x08)
+            case 0x66: // \f
+                buffer.append(0x0C)
+            case 0x6E: // \n
+                buffer.append(0x0A)
+            case 0x72: // \r
+                buffer.append(0x0D)
+            case 0x74: // \t
+                buffer.append(0x09)
+            default:
+                makeError(.escapeSyntax)
+                return false
+            }
+            index += 1
+        }
+        return true
     }
 
-    func parseIdent() -> Any? { // true, false, null
+    // Returns the value indicating the UTF16 high surrogate is not paired
+    private func hasSurrogateError() -> Bool {
+        if highSurrogate != nil {
+            index = highSurrogateIndex
+            makeError(.unpairedSurrogate)
+            return true
+        }
+        return false
+    }
+
+    // name = false / null / true
+    func parseName() -> Any? {
         var result: Any?
         if result == nil
         && index + 4 <= count {
@@ -530,44 +643,51 @@ private class Parser {
         return result
     }
 
+    // ws = *(
+    //            %x20 /              ; Space
+    //            %x09 /              ; Horizontal tab
+    //            %x0A /              ; Line feed or New line
+    //            %x0D                ; Carriage return
+    //        )
     func skipWhitespaces() {
         while index < count {
             let byte = bytes[index]
-            if (0x08 <= byte && byte <= 0x0D) || byte == 0x20 {
+            if byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D {
                 index += 1
                 if byte == 0x0A {
                     line += 1
                     lineStartOffset = index
                 }
-            }
-            else {
+            } else {
                 break
             }
         }
     }
 
-    func makeError(_ code: JSON.Error.Code) {
+    func makeError(_ type: ParsingErrorType) {
         if error == nil {
             let x = (index < count ? index : (count - 1)) - lineStartOffset + 1
             let y = line + 1
 
-            switch code {
+            switch type {
             case .emptyDocument:
-                error = JSON.Error(description: "Empty document", code: code)
+                error = JSON.ParsingError(description: "Empty document")
             case .unexpectedToken:
-                error = JSON.Error(description: "Unexpected token at (\(y),\(x))", code: code)
+                error = JSON.ParsingError(description: "Unexpected token at (\(y),\(x))")
             case .unclosedArray:
-                error = JSON.Error(description: "Unclosed array", code: code)
+                error = JSON.ParsingError(description: "Unclosed array")
             case .unclosedDictionary:
-                error = JSON.Error(description: "Unclosed dictionary", code: code)
+                error = JSON.ParsingError(description: "Unclosed dictionary")
             case .unclosedString:
-                error = JSON.Error(description: "Unclosed string", code: code)
+                error = JSON.ParsingError(description: "Unclosed string")
+            case .unpairedSurrogate:
+                error = JSON.ParsingError(description: "Unpaired escaped surrogate at (\(y),\(x))")
+            case .invalidCharacter:
+                error = JSON.ParsingError(description: "Invalid character at (\(y),\(x))")
             case .numberSyntax:
-                error = JSON.Error(description: "Invalid number syntax at (\(y),\(x))", code: code)
+                error = JSON.ParsingError(description: "Invalid number syntax at (\(y),\(x))")
             case .escapeSyntax:
-                error = JSON.Error(description: "Invalid escape syntax at (\(y),\(x))", code: code)
-            case .invalidJSON: // serialize only
-                break
+                error = JSON.ParsingError(description: "Invalid escape syntax at (\(y),\(x))")
             }
         }
     }

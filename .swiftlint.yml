@@ -2,18 +2,12 @@ included:
   - Sources
   - Tests
 disabled_rules: # rule identifiers to exclude from running
-  - colon
   - cyclomatic_complexity
-  - extension_access_modifier
-  - force_cast
   - file_length
   - function_body_length
   - identifier_name
-  - opening_brace
-  - statement_position
-  - syntactic_sugar
+  - nesting
   - type_body_length
-  - unused_closure_parameter
 
 file_header:
   required_pattern: |
