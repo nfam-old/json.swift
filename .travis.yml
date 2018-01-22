@@ -7,7 +7,6 @@ matrix:
   include:
     - env: swift=latest
     - env: swift=4
-    - env: swift=3.1
 install:
   - docker pull swift:$swift;
 script:
